@@ -869,7 +869,7 @@ def loop_color(user_id):
 
 # ----- Functions to be implemented are below
 
-# Task 3.1
+# Task 3.3
 def recommend(user_id, filter_following):
     """
     Args:
@@ -890,9 +890,63 @@ def recommend(user_id, filter_following):
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
 
-    recommended_posts = {} 
+    # 1. Get the content of all posts the user has positively liked (reacted to)
+    liked_posts_content = query_db('''
+        SELECT p.content FROM posts p
+        JOIN reactions r ON p.id = r.post_id
+        WHERE r.user_id = ? AND r.reaction_type IN ('like','love','laugh','wow','haha')
+    ''', (user_id,))
 
-    return recommended_posts;
+    # If the user hasn't liked any posts or negatively liked posts return the 5 newest posts
+    if not liked_posts_content:
+        return query_db('''
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            FROM posts p JOIN users u ON p.user_id = u.id
+            WHERE p.user_id != ? AND p.id NOT IN (SELECT post_id FROM reactions WHERE user_id = ? ) 
+            ORDER BY p.created_at DESC LIMIT 5
+        ''', (user_id,user_id))
+
+    # 2. Find the most common words from the posts they liked
+    word_counts = collections.Counter()
+    # A simple list of common words to ignore
+    stop_words = {'a','an', 'the', 'in', 'on', 'is', 'it', 'to', 'for', 'of', 'and', 'with', 'that', 'this', 'from', 'some','just','are','than', 'when', 'what'}
+    
+    for post in liked_posts_content:
+        # Use regex to find all words in the post content
+        words = re.findall(r'\b\w+\b', post['content'].lower())
+        for word in words:
+            if word not in stop_words and len(word) > 2:
+                word_counts[word] += 1
+    
+    top_keywords = [word for word, _ in word_counts.most_common(5)]
+    print("New:",top_keywords)
+    
+    query = "SELECT p.id, p.content, p.created_at, u.username, u.id as user_id FROM posts p JOIN users u ON p.user_id = u.id"
+    params = []
+    
+    # If filtering by following, add a WHERE clause to only include followed users.
+    if filter_following:
+        query += " WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
+        params.append(user_id)
+      
+    all_other_posts = query_db(query, tuple(params))
+    
+    recommended_posts = []
+    liked_post_ids = {post['id'] for post in query_db('''SELECT post_id as id FROM reactions 
+                                                      WHERE user_id = ? 
+                                                      AND reactions.reaction_type IN ('like','love','laugh','wow','haha')
+                                                      ''', (user_id,))}
+
+    for post in all_other_posts:
+        if post['id'] in liked_post_ids or post['user_id'] == user_id:
+            continue
+        
+        if any(keyword in post['content'].lower() for keyword in top_keywords):
+            recommended_posts.append(post)
+
+    recommended_posts.sort(key=lambda p: p['created_at'], reverse=True)
+    
+    return recommended_posts[:5]
 
 # Task 3.2
 def user_risk_analysis(user_id):
@@ -909,12 +963,103 @@ def user_risk_analysis(user_id):
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
     
-    score = 0
-
-    return score;
+    profile_score = 0
+    post_score = 0
+    comment_score = 0
+    comment_count = 0
+    post_count=0
+    
+    user_acc_age = query_db('''SELECT (julianday('now') - julianday(created_at)) AS user_acc FROM users WHERE id = ?''', (user_id,))[0]['user_acc']
+    
+    #Rule 2.1
+    def age_adjust(user_acc_age,score):
+        #determine the author's account age in days
+        base_score = score
+        #Adjustment based on author's account age
+        
+        if(user_acc_age < 7):
+            risk_score=base_score * 1.5
+        else:
+            risk_score=base_score
+        return risk_score
+    
+    #Implementing Rule 2.2
+    #Step 1 Calculations
+    profile=query_db('SELECT profile FROM users WHERE id = ?', (user_id,))[0]['profile']
+    _, profile_score = moderate_content(profile)
+    
+    profile_score = age_adjust(user_acc_age, profile_score)
 
     
-# Task 3.3
+    #getting the base_scores
+    user_posts = query_db('''SELECT content, (julianday('now') -julianday(created_at)) AS created_at FROM posts WHERE user_id = ?''', (user_id,))
+    for post in user_posts:
+        _, post_risk_score = moderate_content(post['content'])
+        
+        post_score += age_adjust(user_acc_age, post_risk_score)
+        post_count += 1
+     
+    user_comments = query_db('''SELECT content, (julianday('now') -julianday(created_at))  AS created_at FROM comments WHERE user_id = ?''', (user_id,))
+    for comment in user_comments:
+        _, comment_risk_score = moderate_content(comment['content'])
+        comment_score += age_adjust(user_acc_age, comment_risk_score)
+        comment_count += 1
+
+
+
+    #Calculation for Step 2 and 3 in Rule 2.2
+    #step 2
+    if post_count ==  0:
+        average_post_score = 0
+    else:
+        average_post_score = post_score/post_count
+    
+    #Step 3
+    if comment_count ==  0:
+        average_comment_score = 0
+    else:
+        average_comment_score  = comment_score/comment_count
+    
+    #step 4
+    content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
+    
+    #step 5
+    
+    if(user_acc_age < 7):
+        user_risk_score = content_risk_score * 1.5
+    elif (user_acc_age >=7 and user_acc_age < 30):
+        user_risk_score = content_risk_score * 1.2
+    else:
+        user_risk_score = content_risk_score
+
+
+    #New feature: Increase user_risk score for users that duplicates posts
+    num_c = query_db(
+        '''
+        SELECT COUNT(*) AS num
+        FROM (
+            SELECT content FROM comments WHERE user_id = ?
+            UNION ALL
+            SELECT content FROM posts WHERE user_id = ?
+        ) AS all_content
+        GROUP BY content
+        HAVING COUNT(content) > 1
+        ''',(user_id, user_id))
+    if num_c:
+        num = len(num_c)
+    else:
+        num = 0
+    if num > 0 and num < 3:
+        user_risk_score *= 1.2
+    elif num >= 3:
+        user_risk_score *=1.3
+
+
+    return user_risk_score
+
+
+    
+# Task 3.1
 def moderate_content(content):
     """
     Args
@@ -931,11 +1076,75 @@ def moderate_content(content):
             password: admin
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
-
-    moderated_content = content
+    if not content:
+        return '',0
+    
+    original_content = content
     score = 0
     
+    #New feature: Checking if a content is duplicated 
+    num = query_db(
+        '''
+        SELECT COUNT(*) AS num
+        FROM posts
+        WHERE content = ?
+        ''',(original_content,))[0]['num']
+
+    if num > 1 and num < 3:
+        score += 2
+    elif num >= 3:
+        score += 3
+         
+    #Implementing Stage 1.1 Rules and combining it with Rule 1.2.1 from Exercise 11
+    
+    # Define a regex pattern that matches any whole word in the content that is on the tier 1 list
+    TIER1_PATTERN = r'\b(' + '|'.join(TIER1_WORDS) + r')\b'
+    # Run the regex to find all the matching words
+    matches = re.search(TIER1_PATTERN, original_content, flags=re.IGNORECASE)
+    if (matches):
+        # 5 points for the match as per rule 1.1.1
+        score += 5
+        # Using the same regex, we replace whole string with [content removed due to severe violation]
+        moderated_content = "[content removed due to severe violation]"
+        return moderated_content, score
+    
+    for phrase in TIER2_PHRASES:
+        # Define a regex pattern that matches any whole word in the content that is on the tier 2 list
+        TIER2_PATTERN = re.search(phrase, original_content, flags=re.IGNORECASE)
+        if (TIER2_PATTERN):
+            moderated_content = "[content removed due to spam/scam policy]"
+            score += 5
+            return moderated_content, score
+    
+    TIER3_PATTERN = r'\b(' + '|'.join(TIER3_WORDS) + r')\b'
+    # Run the regex to find all the matching words
+    matches = re.findall(TIER3_PATTERN, original_content, flags=re.IGNORECASE)
+    # 2 points for each match as per rule 1.2.1
+    score += len(matches) * 2
+    # Using the same regex, we replace all words with *
+    moderated_content = re.sub(TIER3_PATTERN, lambda m: '*' * len(m.group(0)), original_content, flags=re.IGNORECASE)
+
+    EXTERNAL_LINK_PATTERN =  r'(https?://[^\s]+|www\.[^\s]+|\b\S+\.\S{2,}\b)'
+    # Run the regex to find all the matching words
+    matches2 = re.findall(EXTERNAL_LINK_PATTERN, moderated_content, flags=re.IGNORECASE)
+    # 2 points for each match as per rule 1.2.1
+    score += len(matches2) * 2
+    # Using the same regex, we replace all URL with [link removed]
+    moderated_content = re.sub(EXTERNAL_LINK_PATTERN, "[link removed]", moderated_content, flags=re.IGNORECASE)
+
+    # Run the regex to find all the matching words
+    content_full = len(re.findall(r'[A-Za-z]', original_content))
+    uppercase_content = len(re.findall(r'[A-Z]', original_content))
+    if (content_full > 15 and uppercase_content/content_full > 0.7):
+        score += 0.5
+
+
+    # Return the updated content string and the score
     return moderated_content, score
+
+
+
+
 
 
 if __name__ == '__main__':

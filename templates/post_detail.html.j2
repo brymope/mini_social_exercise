@@ -5,6 +5,35 @@
 <div class="col-md-8 mx-auto pt-4">
   <div class="card shadow-sm">
     <div class="card-body">
+	{% if post.orig_pid %}
+	  <div class="d-flex justify-content-between align-items-center">
+        <h3 class="card-title mb-0">
+          <a href="/u/{{ post.user_id }}">{{ user_display(post.username) }}</a> <small class="text-muted">&#128257;</small>
+        </h3>
+        {% if session.get('user_id') == post.user_id %}
+        <div class="d-flex align-items-center">
+            <small class="text-muted me-3"><strong>Reposted on:</strong> {{ post.created_at|datetimeformat }}</small>
+            <form action="{{ url_for('delete_post', post_id=post.id) }}" method="POST" onsubmit="return confirm('Are you sure you want to delete this post?');">
+                <button type="submit" class="btn btn-danger" title="Delete Post">
+                   delete
+                </button>
+            </form>
+        </div>
+
+        {% else %}
+        <small class="text-muted"><strong>Reposted on:</strong> {{ post.created_at|datetimeformat }}</small>
+        {% endif %}
+      </div>
+		<p class="card-text mt-2">{{ post.content }}</p>
+		<div class="card shadow-none p-2 mt-2">
+		<h3 class="card-title mb-0">
+          <a href="/u/{{ post.orid_uid }}">{{ user_display(post.orig_username) }}</a>
+        </h3>
+		
+      <p class="card-text mt-2">{{ post.orig_content }}</p>
+	  </div>
+	  
+    {% else %}
       <div class="d-flex justify-content-between align-items-center">
         <h3 class="card-title mb-0">
           <a href="/u/{{ post.user_id }}">{{ user_display(post.username) }}</a>
@@ -22,9 +51,9 @@
         <small class="text-muted">{{ post.created_at|datetimeformat }}</small>
         {% endif %}
       </div>
-      
+	  
       <p class="card-text mt-2">{{ post.content }}</p>
-
+	{% endif %} 
       <!-- Reactions Display and Add Reaction Button (Copied from feed.html.j2) -->
       <div class="d-flex align-items-center mt-2 mb-2">
         <!-- Display existing reactions -->
@@ -62,7 +91,37 @@
         </div>
         {% endif %}
       </div>
+      <!-- Add Repost Function -->
+      {% if session.get('user_id') %}
+	  {% if not post.orig_pid %}
+	        <div class="d-flex justify-content-between mt-3">
+        <button class="btn btn-success btn-sm" data-bs-toggle="modal" data-bs-target="#addRepostModal-{{ post.id }}">Repost</button>
+      </div>
+   
+  
 
+  <div class="modal fade" id="addRepostModal-{{ post.id }}" tabindex="-1" aria-labelledby="addRepostModalLabel-{{ post.id }}" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="addRepostModalLabel-{{ post.id }}">What's on your mind?</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <form action="{{ url_for('repost_post', post_id=post.id) }}" method="POST">
+            <div class="mb-3">
+              <label for="comment-content-{{ post.id }}" class="form-label">What's on your mind?</label>
+              <textarea class="form-control" id="comment-content-{{ post.id }}" name="content" rows="3"></textarea>
+            </div>
+            <button type="submit" class="btn btn-success">Repost</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+		{% endif %}
+      {% endif %}
       <hr>
 
       <!-- Comments Section -->

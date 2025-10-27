@@ -123,7 +123,7 @@ def feed():
 
     if sort == 'popular':
         query = f"""
-            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
+            SELECT p.id, p.content, p.created_at, p.orig_pid, u.username, u.id as user_id,
                    IFNULL(r.total_reactions, 0) as total_reactions
             FROM posts p
             JOIN users u ON p.user_id = u.id
@@ -136,11 +136,12 @@ def feed():
         """
         final_params = params + list(pagination_params)
         posts = query_db(query, final_params)
+
     elif sort == 'recommended':
         posts = recommend(current_user_id, show == 'following' and current_user_id)
     else:  # Default sort is 'new'
         query = f"""
-            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            SELECT p.id, p.content, p.created_at, p.orig_pid, u.username, u.id as user_id
             FROM posts p
             JOIN users u ON p.user_id = u.id
             {where_clause}
@@ -178,6 +179,19 @@ def feed():
         comments_raw = query_db('SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC', (post['id'],))
         post_dict = dict(post)
         post_dict['content'], _ = moderate_content(post_dict['content'])
+
+        #check if it is a repost, get username or originL poster
+        if post_dict.get('orig_pid'):
+            orig = query_db('SELECT u.username, u.id, p.content FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?',(post_dict['orig_pid'],), one=True)
+            post_dict['orig_username'] = orig['username'] if orig else None
+            post_dict['orig_uid'] = orig['id'] if orig else None
+            post_dict['orig_content'] = orig['content'] if orig else None
+        else:
+            post_dict['orig_username'] = None
+            post_dict['orig_uid'] = None
+            post_dict['orig_content'] = None
+        #end of username check
+
         comments_moderated = []
         for comment in comments_raw:
             comment_dict = dict(comment)
@@ -230,8 +244,54 @@ def add_post():
 
     # Redirect back to the main feed to see the new post
     return redirect(url_for('feed'))
+
+#reposting posts
+@app.route('/posts/<int:post_id>/repost_post', methods=['POST'])
+def repost_post(post_id):
+    """Handles reposting a post"""
+    user_id = session.get('user_id')
+
+    # Get content from the submitted form
+    content = request.form.get('content')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to repost.', 'danger')
+        return redirect(url_for('login'))
+
+    # Find the post in the database
+    post = query_db('SELECT id, user_id FROM posts WHERE id = ?', (post_id,), one=True)
+
+    # Check if the post exists and if the current user is the owner
+    if not post:
+        flash('Post not found.', 'danger')
+        return redirect(url_for('feed'))
+
+    if post['user_id'] == user_id:
+        # Security check: prevent users from reposting their own posts.
+        flash('You can not repost your own post.', 'danger')
+        return redirect(request.referrer)
     
+    # Check if the user already reposted the post
+    repost = query_db('''SELECT * FROM posts WHERE orig_pid = ? AND user_id = ?''', (post_id,user_id,), one=True)
+    if repost:
+        flash('You already reposted this post', 'danger')
+        return redirect(request.referrer)
     
+    # If all checks pass, proceed with repost
+    
+    db = get_db()
+    db.execute('INSERT INTO posts (user_id, content, orig_pid) VALUES (?, ?, ?)',
+                   (user_id,content,post_id,))
+    db.commit()
+
+    flash('Repost Successful.', 'success')
+
+
+    # Redirect back to the main feed to see the new post
+    return redirect(url_for('feed'))
+
+
 @app.route('/posts/<int:post_id>/delete', methods=['POST'])
 def delete_post(post_id):
     """Handles deleting a post."""
@@ -354,7 +414,7 @@ def post_detail(post_id):
     """Displays a single post and its comments, with content moderation applied."""
     
     post_raw = query_db('''
-        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+        SELECT p.id, p.content, p.created_at, p.orig_pid, u.username, u.id as user_id
         FROM posts p
         JOIN users u ON p.user_id = u.id
         WHERE p.id = ?
@@ -370,6 +430,19 @@ def post_detail(post_id):
     # Unpack the tuple from moderate_content, we only need the moderated content string here
     moderated_post_content, _ = moderate_content(post['content'])
     post['content'] = moderated_post_content
+
+    #username of original owner check
+    if post.get('orig_pid'):
+        orig = query_db('SELECT u.username,u.id, p.content FROM posts p JOIN users u ON p.user_id = u.id WHERE p.id = ?', (post['orig_pid'],),one=True)
+        post['orig_username'] = orig['username'] if orig else None
+        post['orig_uid'] = orig['id'] if orig else None
+        post['orig_content'] = orig['content'] if orig else None
+    else:
+        post['orig_username'] = None
+        post['orig_uid'] = None
+        post['orig_content'] = None
+
+    #end of username check
 
     #  Fetch Reactions (No moderation needed) 
     reactions = query_db('''
